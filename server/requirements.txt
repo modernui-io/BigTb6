@@ -1,4 +1,4 @@
-pipecat-ai[google,webrtc]
+pipecat-ai[google,webrtc,daily]
 pipecat-ai-small-webrtc-prebuilt
 python-dotenv
 fastapi

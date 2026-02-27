@@ -35,6 +35,8 @@ export default function Home() {
 
   const callObjectRef = useRef<DailyCall | null>(null);
   const botAudioRef = useRef<HTMLAudioElement | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const currentRoomUrlRef = useRef<string | null>(null);
 
   const xrayUploadEndpoint =
     process.env.NEXT_PUBLIC_XRAY_UPLOAD_ENDPOINT ?? 'http://localhost:8000/upload_xray';
@@ -148,6 +150,7 @@ export default function Home() {
       if (!roomUrl || !token) {
         throw new Error('Missing room URL or token');
       }
+      currentRoomUrlRef.current = roomUrl;
 
       const startResponse = await fetch(`${apiBase}/start-bot`, {
         method: 'POST',
@@ -209,8 +212,45 @@ export default function Home() {
         addMessage(speaker, text);
       });
 
+      if (!eventSourceRef.current) {
+        const eventsUrl = `${apiBase}/events`;
+        const eventSource = new EventSource(eventsUrl);
+        eventSourceRef.current = eventSource;
+        eventSource.onmessage = (evt) => {
+          try {
+            const payload = JSON.parse(evt.data);
+            const roomUrlFromEvent = payload?.room_url ?? null;
+            if (
+              roomUrlFromEvent &&
+              currentRoomUrlRef.current &&
+              roomUrlFromEvent !== currentRoomUrlRef.current
+            ) {
+              return;
+            }
+            const text = payload?.text ?? '';
+            if (text) addMessage('bot', text);
+          } catch (error) {
+            console.error('Failed to parse bot transcript event', error);
+          }
+        };
+        eventSource.onerror = (error) => {
+          console.error('Bot transcript event stream error', error);
+        };
+      }
+
       callObject.on('participant-joined', (event: any) => {
         console.log('Daily participant-joined', event);
+        const participantId =
+          event?.participant?.participantId ?? event?.participant?.id ?? event?.participant?.session_id;
+        if (participantId && event?.participant?.local !== true) {
+          try {
+            callObject.updateParticipant(participantId, {
+              setSubscribedTracks: true,
+            });
+          } catch (error) {
+            console.error('Failed to subscribe to participant tracks', error);
+          }
+        }
         updateMediaStreams();
       });
       callObject.on('participant-updated', updateMediaStreams);
@@ -237,17 +277,12 @@ export default function Home() {
       });
       callObject.on('track-stopped', updateMediaStreams);
 
-      await callObject.join({ url: roomUrl, token });
       try {
-        callObject.setSubscribedTracks({
-          audio: true,
-          video: false,
-          screenAudio: true,
-          screenVideo: false,
-        });
+        callObject.setSubscribeToTracksAutomatically(false);
       } catch (error) {
-        console.error('Failed to set subscribed tracks', error);
+        console.error('Failed to disable auto track subscriptions', error);
       }
+      await callObject.join({ url: roomUrl, token });
       await callObject.setLocalAudio(micEnabled);
       await callObject.setLocalVideo(cameraEnabled);
       try {
@@ -272,6 +307,11 @@ export default function Home() {
       callObject.destroy();
       callObjectRef.current = null;
     }
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    currentRoomUrlRef.current = null;
 
     if (localStream) {
       localStream.getTracks().forEach((track) => track.stop());

@@ -1,4 +1,5 @@
 import os
+import json
 import io
 import asyncio
 import logging
@@ -13,6 +14,7 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.transports.daily.transport import DailyParams
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.services.llm_service import FunctionCallParams
@@ -231,6 +233,12 @@ def get_analyze_xray_tool() -> FunctionSchema:
 
 
 transport_params = {
+    "daily": lambda: DailyParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+        video_in_enabled=True,
+        camera_out_enabled=True,
+    ),
     "webrtc": lambda: TransportParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
@@ -709,6 +717,16 @@ IMPORTANT:
 
         context = LLMContext([], tools=tools_schema)
         context_aggregator = LLMContextAggregatorPair(context)
+        room_url = os.getenv("DAILY_ROOM_URL", "")
+
+        @context_aggregator.assistant().event_handler("on_assistant_turn_stopped")
+        async def on_assistant_turn_stopped(aggregator, message):
+            text = getattr(message, "content", "") or ""
+            text = text.strip()
+            if not text:
+                return
+            payload = {"text": text, "room_url": room_url}
+            print(f"BOT_TEXT:{json.dumps(payload, ensure_ascii=True)}")
 
         # Register function handlers after context is set
         llm.register_function(
@@ -847,12 +865,33 @@ IMPORTANT:
                 context_aggregator.assistant(),
             ]
         )
-        task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
+        # Disable Pipecat's default idle timeout (300s) so the session relies
+        # on explicit disconnect/room expiration instead of auto-cancel.
+        try:
+            task = PipelineTask(
+                pipeline,
+                params=PipelineParams(enable_metrics=True),
+                idle_timeout_secs=None,
+                cancel_on_idle_timeout=False,
+            )
+        except TypeError:
+            # Fallback for older PipelineTask signatures.
+            task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
         print("Running task...")
+        client_connected = asyncio.Event()
+        shutdown_task = None
+
+        async def _shutdown_if_no_client(timeout_seconds: int = 60):
+            try:
+                await asyncio.wait_for(client_connected.wait(), timeout=timeout_seconds)
+            except asyncio.TimeoutError:
+                print("No client joined within timeout. Shutting down bot.")
+                await task.cancel()
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
             print(f"Client connected: {client}")
+            client_connected.set()
             await maybe_capture_participant_camera(transport, client, framerate=1)
             await maybe_capture_participant_screen(transport, client, framerate=1)
             llm.set_video_input_paused(False)
@@ -887,7 +926,10 @@ IMPORTANT:
             await task.cancel()
 
         runner = PipelineRunner()
+        shutdown_task = asyncio.create_task(_shutdown_if_no_client())
         await runner.run(task)
+        if shutdown_task:
+            shutdown_task.cancel()
     except Exception as e:
         print(f"ERROR: {e}")
         import traceback

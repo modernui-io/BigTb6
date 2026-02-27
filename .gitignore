@@ -14,8 +14,6 @@ build/
 logs/
 
 # Environment
-.env
-.env.local
 
 # IDE
 .vscode/
@@ -27,3 +25,4 @@ Thumbs.db
 
 # PIDs
 *.pid
+config.bat
